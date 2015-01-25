@@ -16,6 +16,7 @@
 """Emit commands needed for QCOM devices during OTA installation
 (installing the radio image)."""
 
+import hashlib
 import common
 import re
 
@@ -30,9 +31,12 @@ def LoadFilesMap(zip):
     line = line.strip()
     if not line or line.startswith("#"): continue
     pieces = line.split()
-    if not (len(pieces) == 3):
+    if not (len(pieces) == 2 or len(pieces) == 3):
       raise ValueError("malformed filesmap line: \"%s\"" % (line,))
-    d[pieces[0]] = (pieces[1], pieces[2])
+    file_size = zip.getinfo("RADIO/"+pieces[0]).file_size
+    sha1 = hashlib.sha1()
+    sha1.update(zip.read("RADIO/"+pieces[0]))
+    d[pieces[0]] = (pieces[1], sha1.hexdigest(), file_size)
   return d
 
 def GetRadioFiles(z):
@@ -44,11 +48,11 @@ def GetRadioFiles(z):
   return out
 
 def FullOTA_Assertions(info):
-  #TODO: Implement device specific asserstions.
+  AddTrustZoneAssertion(info)
   return
 
 def IncrementalOTA_Assertions(info):
-  #TODO: Implement device specific asserstions.
+  AddTrustZoneAssertion(info)
   return
 
 def InstallRawImage(image_data, api_version, input_zip, fn, info, filesmap):
@@ -59,13 +63,13 @@ def InstallRawImage(image_data, api_version, input_zip, fn, info, filesmap):
         return
     partition = filesmap[filename][0]
     checksum = filesmap[filename][1]
-    info.script.AppendExtra('run_program("/sbin/dd", "if=%s", "of=/tmp/test.img");'
-            % (partition))
-    info.script.AppendExtra('ifelse((sha1_check(read_file("/tmp/test.img")) == "%s"),'
+    file_size = filesmap[filename][2]
+    # read_file returns a blob or NULL. Use sha1_check to convert to a string
+    # that can be evaluated (a NULL results in an empty string)
+    info.script.AppendExtra('ifelse((sha1_check(read_file("EMMC:%s:%d:%s")) != ""),'
             '(ui_print("%s already up to date")),'
             '(package_extract_file("%s", "%s")));'
-            % (checksum, partition, filename, partition))
-    info.script.AppendExtra('delete("/tmp/test.img");')
+            % (partition, file_size, checksum, partition, filename, partition))
     common.ZipWriteStr(info.output_zip, filename, image_data)
     return
   else:
@@ -94,4 +98,18 @@ def FullOTA_InstallEnd(info):
 def IncrementalOTA_InstallEnd(info):
   #TODO: Implement device specific asserstions.
   print "warning radio-update: no real implementation of IncrementalOTA_InstallEnd."
+  return
+
+def AddTrustZoneAssertion(info):
+  # Presence of filesmap indicates packaged firmware
+  filesmap = LoadFilesMap(info.input_zip)
+  if filesmap != {}:
+    return
+  android_info = info.input_zip.read("OTA/android-info.txt")
+  m = re.search(r'require\s+version-trustzone\s*=\s*(\S+)', android_info)
+  if m:
+    versions = m.group(1).split('|')
+    if len(versions) and '*' not in versions:
+      cmd = 'assert(oppo.verify_trustzone(' + ','.join(['"%s"' % tz for tz in versions]) + ') == "1");'
+      info.script.AppendExtra(cmd)
   return
