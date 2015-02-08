@@ -1,3 +1,19 @@
+/*
+ * Copyright (C) 2015 The CyanogenMod Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.cyanogenmod.settings.device;
 
 import android.app.ActivityManagerNative;
@@ -9,7 +25,8 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
-import android.media.IAudioService;
+import android.hardware.TorchManager;
+import android.media.session.MediaSessionLegacyHelper;
 import android.os.Handler;
 import android.os.Message;
 import android.os.PowerManager;
@@ -21,11 +38,10 @@ import android.os.UserHandle;
 import android.provider.MediaStore;
 import android.util.Log;
 import android.view.KeyEvent;
+import android.view.WindowManagerGlobal;
 
 import com.android.internal.os.DeviceKeyHandler;
 import com.android.internal.util.ArrayUtils;
-//import com.android.internal.util.cm.NavigationRingHelpers;
-//import com.android.internal.util.cm.TorchConstants;
 
 public class KeyHandler implements DeviceKeyHandler {
 
@@ -43,7 +59,7 @@ public class KeyHandler implements DeviceKeyHandler {
 
     private static final int GESTURE_WAKELOCK_DURATION = 3000;
 
-    private static final int[] sSupportedGestures = new int[]{
+    private static final int[] sSupportedGestures = new int[] {
         FLIP_CAMERA_SCANCODE,
         GESTURE_CIRCLE_SCANCODE,
         GESTURE_SWIPE_DOWN_SCANCODE,
@@ -58,6 +74,7 @@ public class KeyHandler implements DeviceKeyHandler {
     private KeyguardManager mKeyguardManager;
     private EventHandler mEventHandler;
     private SensorManager mSensorManager;
+    private TorchManager mTorchManager;
     private Sensor mProximitySensor;
     WakeLock mProximityWakeLock;
     WakeLock mGestureWakeLock;
@@ -76,7 +93,14 @@ public class KeyHandler implements DeviceKeyHandler {
 
     private void ensureKeyguardManager() {
         if (mKeyguardManager == null) {
-            mKeyguardManager = (KeyguardManager) mContext.getSystemService(Context.KEYGUARD_SERVICE);
+            mKeyguardManager =
+                    (KeyguardManager) mContext.getSystemService(Context.KEYGUARD_SERVICE);
+        }
+    }
+
+    private void ensureTorchManager() {
+        if (mTorchManager == null) {
+            mTorchManager = (TorchManager) mContext.getSystemService(Context.TORCH_SERVICE);
         }
     }
 
@@ -84,7 +108,7 @@ public class KeyHandler implements DeviceKeyHandler {
         @Override
         public void handleMessage(Message msg) {
             KeyEvent event = (KeyEvent) msg.obj;
-            switch(event.getScanCode()) {
+            switch (event.getScanCode()) {
             case FLIP_CAMERA_SCANCODE:
                 if (event.getAction() == KeyEvent.ACTION_UP) {
                     break;
@@ -92,40 +116,42 @@ public class KeyHandler implements DeviceKeyHandler {
             case GESTURE_CIRCLE_SCANCODE:
                 ensureKeyguardManager();
                 String action = null;
+                mGestureWakeLock.acquire(GESTURE_WAKELOCK_DURATION);
                 if (mKeyguardManager.isKeyguardSecure() && mKeyguardManager.isKeyguardLocked()) {
                     action = MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE;
                 } else {
+                    try {
+                        WindowManagerGlobal.getWindowManagerService().dismissKeyguard();
+                    } catch (RemoteException e) {
+                        // Ignore
+                    }
                     action = MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA;
                 }
-                mGestureWakeLock.acquire(GESTURE_WAKELOCK_DURATION);
+                mPowerManager.wakeUp(SystemClock.uptimeMillis());
                 Intent intent = new Intent(action, null);
                 startActivitySafely(intent);
                 break;
             case GESTURE_SWIPE_DOWN_SCANCODE:
-                dispatchMediaKeyWithWakeLockToAudioService(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+                dispatchMediaKeyWithWakeLockToMediaSession(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
                 break;
-                /*
             case GESTURE_V_SCANCODE:
-                if (NavigationRingHelpers.isTorchAvailable(mContext)) {
-                    mGestureWakeLock.acquire(GESTURE_WAKELOCK_DURATION);
-                    Intent torchIntent = new Intent(TorchConstants.ACTION_TOGGLE_STATE);
-                    torchIntent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-                    mContext.sendBroadcast(torchIntent);
-                }
+                ensureTorchManager();
+                mGestureWakeLock.acquire(GESTURE_WAKELOCK_DURATION);
+                mTorchManager.toggleTorch();
                 break;
-                */
             case GESTURE_LTR_SCANCODE:
-                dispatchMediaKeyWithWakeLockToAudioService(KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+                dispatchMediaKeyWithWakeLockToMediaSession(KeyEvent.KEYCODE_MEDIA_PREVIOUS);
                 break;
             case GESTURE_GTR_SCANCODE:
-                dispatchMediaKeyWithWakeLockToAudioService(KeyEvent.KEYCODE_MEDIA_NEXT);
+                dispatchMediaKeyWithWakeLockToMediaSession(KeyEvent.KEYCODE_MEDIA_NEXT);
                 break;
             }
         }
     }
 
     public boolean handleKeyEvent(KeyEvent event) {
-        if (event.getAction() != KeyEvent.ACTION_UP && event.getScanCode() != FLIP_CAMERA_SCANCODE) {
+        if (event.getAction() != KeyEvent.ACTION_UP
+                && event.getScanCode() != FLIP_CAMERA_SCANCODE) {
             return false;
         }
         boolean isKeySupported = ArrayUtils.contains(sSupportedGestures, event.getScanCode());
@@ -175,53 +201,29 @@ public class KeyHandler implements DeviceKeyHandler {
         }, mProximitySensor, SensorManager.SENSOR_DELAY_FASTEST);
     }
 
-    private IAudioService getAudioService() {
-        IAudioService audioService = IAudioService.Stub.asInterface(
-                ServiceManager.checkService(Context.AUDIO_SERVICE));
-        if (audioService == null) {
-            Log.w(TAG, "Unable to find IAudioService interface.");
-        }
-        return audioService;
-    }
-
-    private void dispatchMediaKeyWithWakeLockToAudioService(int keycode) {
-        if (ActivityManagerNative.isSystemReady()) {
-            IAudioService audioService = getAudioService();
-            if (audioService != null) {
-                /*
-                try {
-                    KeyEvent event = new KeyEvent(SystemClock.uptimeMillis(),
-                            SystemClock.uptimeMillis(), KeyEvent.ACTION_DOWN, keycode, 0);
-                    audioService.dispatchMediaKeyEventUnderWakelock(event);
-                    event = KeyEvent.changeAction(event, KeyEvent.ACTION_UP);
-                    audioService.dispatchMediaKeyEventUnderWakelock(event);
-                } catch (RemoteException e) {
-                    Log.e(TAG, "dispatchMediaKeyEvent threw exception " + e);
-                }
-                */
-            }
+    private void dispatchMediaKeyWithWakeLockToMediaSession(int keycode) {
+        MediaSessionLegacyHelper helper = MediaSessionLegacyHelper.getHelper(mContext);
+        if (helper != null) {
+            KeyEvent event = new KeyEvent(SystemClock.uptimeMillis(),
+                    SystemClock.uptimeMillis(), KeyEvent.ACTION_DOWN, keycode, 0);
+            helper.sendMediaButtonEvent(event, true);
+            event = KeyEvent.changeAction(event, KeyEvent.ACTION_UP);
+            helper.sendMediaButtonEvent(event, true);
+        } else {
+            Log.w(TAG, "Unable to send media key event");
         }
     }
 
     private void startActivitySafely(Intent intent) {
-        /*
         intent.addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK
                 | Intent.FLAG_ACTIVITY_SINGLE_TOP
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        mPowerManager.wakeUp(SystemClock.uptimeMillis());
-        if (!mKeyguardManager.isKeyguardSecure() || !mKeyguardManager.isKeyguardLocked()) {
-            try {
-                ActivityManagerNative.getDefault().dismissKeyguardOnNextActivity();
-            } catch (RemoteException e) {
-                Log.w(TAG, "can't dismiss keyguard on launch");
-            }
-        }
         try {
             UserHandle user = new UserHandle(UserHandle.USER_CURRENT);
             mContext.startActivityAsUser(intent, null, user);
         } catch (ActivityNotFoundException e) {
+            // Ignore
         }
-        */
     }
 }
